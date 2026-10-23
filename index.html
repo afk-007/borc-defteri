@@ -289,11 +289,6 @@ details.yr-more summary{cursor:pointer;font-size:13px;color:var(--accent);font-w
   </header>
 
   <section class="view" id="v-ozet">
-    <form class="ask" id="quick" autocomplete="off">
-      <input id="quick-in" placeholder="Örn: Garanti kartla 450 TL market" enterkeyhint="send" aria-label="Asistana yaz">
-      <button aria-label="Gönder"><svg class="i" width="20" height="20" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
-    </form>
-    <p class="hint">Yazın ya da klavyenin mikrofonuyla söyleyin; asistan doğru hesabı bulup kaydeder.</p>
     <div id="ozet-body" class="view" style="display:flex;flex-direction:column;gap:18px"></div>
   </section>
 
@@ -304,8 +299,8 @@ details.yr-more summary{cursor:pointer;font-size:13px;color:var(--accent);font-w
   <section class="view" id="v-asistan" hidden>
     <div class="chat" id="chat"></div>
     <div class="composer">
-      <div class="btns"><button class="btn sm ghost" data-act="memory" type="button" style="flex:0 0 auto">Asistanın öğrendikleri</button></div>
-      <div class="chips" id="examples"></div>
+      <div class="btns"><button class="btn sm ghost" data-act="memory" type="button" style="flex:0 0 auto">Asistanın öğrendikleri</button><button class="btn sm ghost" data-act="toggle-ex" type="button" aria-expanded="false" style="flex:0 0 auto">Örnek cümleler ▾</button></div>
+      <div class="chips" id="examples" hidden style="max-height:40vh;overflow:auto"></div>
       <form class="ask" id="composer" autocomplete="off">
         <input id="comp-in" placeholder="Ne harcadınız, ne ödediniz?" enterkeyhint="send" aria-label="Asistana yaz">
         <button aria-label="Gönder"><svg class="i" width="20" height="20" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
@@ -1167,7 +1162,7 @@ function renderOzet(C) {
     <span class="hero-sub">${S.accounts.length} hesap · ${C.banks.length} banka · kartlar, KMH ve kalan kredi anaparası</span></button>
     <div class="meter" aria-hidden="true"><span style="width:${pct.toFixed(1)}%"></span></div>
     <div class="hero-row num"><button class="hero-link" data-act="why" data-key="used">Kullanılan limit ${money0(usedLimit)}</button><button class="hero-link" data-act="why" data-key="limit">Toplam limit ${money0(C.limit)}</button></div>
-    <button class="hero-ai" data-act="open-ai"><svg class="i" width="20" height="20" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>Asistana söyle / yaz</button></section>`;
+    </section>`;
   const cardPct = C.cardLimit ? Math.round(C.cardDebt / C.cardLimit * 100) : 0;
   h += `<div class="tiles">
     <button class="tile" data-act="why" data-key="due30"><span class="lbl">30 gün içinde ödenecek</span><span class="val num">${money0(C.due30)}</span><span class="sub">${C.in30.length} ödeme kalemi${C.incSum30 > 0 ? ` · beklenen gelir <b style="color:var(--good)">+${money0(C.incSum30)}</b>` : ""}</span></button>
@@ -2552,7 +2547,8 @@ document.addEventListener("click", e => {
       break;
     }
     case "undo-msg": undoMsg(+el.dataset.i); break;
-    case "example-chip": $("#comp-in").value = el.dataset.text; $("#comp-in").focus(); break;
+    case "example-chip": $("#comp-in").value = el.dataset.text; $("#examples").hidden = true; document.querySelector('[data-act="toggle-ex"]').setAttribute("aria-expanded", "false"); $("#comp-in").focus(); break;
+    case "toggle-ex": { const ex = $("#examples"); ex.hidden = !ex.hidden; el.setAttribute("aria-expanded", String(!ex.hidden)); el.textContent = ex.hidden ? "Örnek cümleler ▾" : "Örnekleri gizle ▴"; break; }
   }
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && S.sheet) closeSheet(); });
@@ -3146,10 +3142,7 @@ async function ask(text) {
   chatSave(); renderChat();
 }
 $("#composer").onsubmit = e => { e.preventDefault(); const v = $("#comp-in").value; $("#comp-in").value = ""; ask(v); };
-$("#quick").onsubmit = e => {
-  e.preventDefault(); const v = $("#quick-in").value; if (!v.trim()) return;
-  $("#quick-in").value = ""; S.view = "asistan"; render(); ask(v);
-};
+
 
 // ---------- offline parser (Claude yoksa) ----------
 const MONTHS = ["ocak","subat","mart","nisan","mayis","haziran","temmuz","agustos","eylul","ekim","kasim","aralik"];
