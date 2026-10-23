@@ -3024,6 +3024,7 @@ const gemSave = c => { try { localStorage.setItem(LS_GEM, JSON.stringify(c)); } 
 const gemOn = () => !window.claude && !!gemCfg().key;
 // yapıştırılan anahtarı temizle: boşluk, satır sonu, tırnak
 const cleanKey = k => String(k || "").replace(/[\s"'“”‘’]/g, "");
+const DEF_MODEL = "gemini-2.5-flash"; // hızlı ve kararlı; bulunamazsa uygun model kendiliğinden seçilir
 const GEM_API = "https://generativelanguage.googleapis.com/v1beta/models";
 // model adı bulunamazsa (404) anahtarın erişebildiği en uygun "flash" modelini seç
 // "Gemini 3.1 Pro" gibi yazılan adı API biçimine çevir: "gemini-3.1-pro"
@@ -3052,19 +3053,19 @@ function gemError(e) {
   if (st === 429) return "Gemini kota/hız sınırı (" + (e.tried && e.tried.length ? "denenen modeller: " + e.tried.join(", ") : "model: " + (gemCfg().model || "")) + "). Google'ın açıklaması: " + d.slice(0, 220) + (/limit: ?0/i.test(d) ? " — Bu, anahtarın bağlı olduğu projede bu modelin ücretsiz kotasının hiç olmadığı anlamına gelir; AI Studio'da yeni bir proje ile anahtar oluşturmayı deneyin." : " Bir dakika sonra yeniden deneyin.") + " Bu sırada asistan öğrendikleriyle çalışır.";
   if (st === 404) return "Model bulunamadı: " + d;
   if ([500, 502, 503, 504].includes(st)) return "Gemini şu an çok yoğun (" + (e.tried && e.tried.length ? "denenen modeller: " + e.tried.join(", ") : "kod " + st) + "). Bu Google tarafında geçici bir durum; birkaç dakika sonra yeniden deneyin. Bu sırada asistan öğrendikleriyle çalışır.";
-  if (e && (e.name === "AbortError")) return "Gemini 60 saniyede yanıt vermedi (model: " + (gemCfg().model || "gemini-flash-latest") + "). İnternet bağlantısını kontrol edin ya da Veri ve yedek → Asistan bölümünde modeli “gemini-2.5-flash” yapıp yeniden deneyin.";
+  if (e && (e.name === "AbortError")) return "Gemini yanıt vermedi (" + (e.tried && e.tried.length ? "denenen modeller: " + e.tried.join(", ") : "model: " + (gemCfg().model || DEF_MODEL)) + "). İnternet bağlantısını kontrol edip birkaç dakika sonra yeniden deneyin; bu sırada asistan öğrendikleriyle çalışır.";
   if (e && e.name === "TypeError") return "Google'a ulaşılamadı; internet bağlantısını kontrol edin.";
   return "Bağlanamadı: " + d + (st ? " (kod " + st + ")" : "");
 }
 // düşünme ayarı: kayıt işleri için uzun "düşünme" gereksiz ve yavaş; desteklemeyen model 400 verirse ayar kaldırılır
 const thinkCfg = m => /gemini-2\.5-flash/.test(m) ? {thinkingBudget:0} : /gemini-2\.5-pro/.test(m) ? {thinkingBudget:128} : /gemini-[3-9]|latest/.test(m) ? {thinkingLevel:"low"} : null;
 async function gemini(prompt, {json = true, search = false, noThink = false} = {}, retried, viaQuery, tried = []) {
-  const c = gemCfg(); c.key = cleanKey(c.key); const model = normModel(c.model) || "gemini-flash-latest";
+  const c = gemCfg(); c.key = cleanKey(c.key); const model = (normModel(c.model) === "gemini-flash-latest" && !c.note ? "" : normModel(c.model)) || DEF_MODEL; // eski varsayılan (elle seçilmemişse) yavaştı
   const body = {contents:[{role:"user", parts:[{text:prompt}]}], generationConfig:{temperature:0.2}};
   if (json && !search) body.generationConfig.responseMimeType = "application/json";
   if (search) body.tools = [{google_search:{}}];
   const tc = !noThink && !c.noThink && thinkCfg(model); if (tc) body.generationConfig.thinkingConfig = tc;
-  const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 60000);
+  const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), 35000);
   try {
     // anahtar normalde başlıkta gider; başlıkla reddedilirse (401) bir kez de adreste (?key=) denenir — ikisi birlikte gönderilmez
     const r = await fetch(GEM_API + "/" + encodeURIComponent(model) + ":generateContent" + (viaQuery ? "?key=" + encodeURIComponent(c.key) : ""),
@@ -3088,6 +3089,15 @@ async function gemini(prompt, {json = true, search = false, noThink = false} = {
     const j = await r.json(), text = ((j.candidates || [])[0] || {}).content ? j.candidates[0].content.parts.map(p => p.text || "").join("") : "";
     if (!json) return text;
     const m = text.match(/\{[\s\S]*\}/); return m ? JSON.parse(m[0]) : null;
+  } catch (err) {
+    // süre doldu (model takıldı) → sıradaki modele geç (en çok 3 deneme)
+    if (err && err.name === "AbortError" && tried.length < 3) {
+      const t = tried.concat([model]);
+      let m = null; try { m = await pickModel(c.key, "", t); } catch (x) {}
+      if (m) { clearTimeout(tm); gemSave({...gemCfg(), model:m, note:model + " yanıt vermedi; " + m + " seçildi."}); return gemini(prompt, {json, search}, true, viaQuery, t); }
+      err.tried = t;
+    }
+    throw err;
   } finally { clearTimeout(tm); }
 }
 // kalıp: sayılar # olur; "5 bin", "1.250,50" tek sayı sayılır
@@ -3152,7 +3162,7 @@ function gemSettingsHTML() {
     <p class="note">Google AI Studio'dan aldığınız ücretsiz anahtarı girin. Anahtar yalnızca bu telefonda saklanır. İnternet ya da Gemini yokken asistan öğrendiği ${learned} kalıp ve yerel ayrıştırıcıyla çalışmaya devam eder.</p>
     <form class="f" id="gem-form">${fld("g-key", "Gemini API anahtarı", c.key || "", 'type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="AQ.… ya da AIza…"', "AI Studio → API keys listesinde anahtarın yanındaki kopyala simgesiyle alınan, “AQ.” (eski anahtarlarda “AIza”) ile başlayan uzun kod. Anahtar adı, proje adı ya da proje numarası değil.")}
     <label class="check"><input type="checkbox" id="g-show"> Anahtarı göster</label>
-    ${fld("g-model", "Model", c.model || "gemini-flash-latest", 'list="g-models" autocomplete="off" autocapitalize="off" spellcheck="false"', "Listeden seçin ya da “Gemini 3.1 Pro” gibi yazın; doğru ad kendiliğinden bulunur.")}<datalist id="g-models"></datalist>
+    ${fld("g-model", "Model", c.model || DEF_MODEL, 'list="g-models" autocomplete="off" autocapitalize="off" spellcheck="false"', "Listeden seçin ya da “Gemini 3.1 Pro” gibi yazın; doğru ad kendiliğinden bulunur.")}<datalist id="g-models"></datalist>
     <div class="btns"><button class="btn sm ghost" type="button" id="g-list">Kullanılabilir modelleri getir</button></div>
     <div class="btns"><button class="btn pri" type="submit">Kaydet</button><button class="btn ghost" type="button" id="g-test">Bağlantıyı dene</button></div></form>
     <div class="btns"><button class="btn ghost" type="button" id="g-rates">Faiz oranlarını şimdi güncelle</button><button class="btn ghost" type="button" id="g-notif">Bildirimlere izin ver</button></div>
@@ -3161,7 +3171,7 @@ function gemSettingsHTML() {
 function bindGemSettings() {
   const f = $("#gem-form"); if (!f) return;
   const out = t => { $("#g-out").textContent = t; };
-  const read = () => ({key:cleanKey($("#g-key").value), model:normModel($("#g-model").value) || "gemini-flash-latest"});
+  const read = () => ({key:cleanKey($("#g-key").value), model:normModel($("#g-model").value) || DEF_MODEL});
   $("#g-list").onclick = async () => { const k = cleanKey($("#g-key").value); if (badKey(k)) return out(badKey(k)); out("Modeller getiriliyor…");
     try { const ms = await listModels(k); $("#g-models").innerHTML = ms.map(n => `<option value="${esc(n)}">`).join(""); out(ms.length + " model bulundu: " + ms.slice(0, 12).join(", ") + (ms.length > 12 ? "…" : "") + ". Model kutusuna dokunup listeden seçin."); } catch (e) { out(gemError(e)); } };
   const badKey = k => !k ? "Anahtar boş." : !/^(AIza[0-9A-Za-z_\-]{30,}|AQ\.[0-9A-Za-z._\-]{20,})$/.test(k) ? "Bu bir Gemini API anahtarına benzemiyor (" + k.length + " karakter, “" + k.slice(0, 6) + "…” ile başlıyor). Anahtar “AQ.” (eski anahtarlarda “AIza”) ile başlar; AI Studio'da anahtarın yanındaki kopyala simgesine dokunup yeniden yapıştırın." : "";
