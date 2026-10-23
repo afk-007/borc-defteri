@@ -3024,7 +3024,7 @@ const gemSave = c => { try { localStorage.setItem(LS_GEM, JSON.stringify(c)); } 
 const gemOn = () => !window.claude && !!gemCfg().key;
 // yapıştırılan anahtarı temizle: boşluk, satır sonu, tırnak
 const cleanKey = k => String(k || "").replace(/[\s"'“”‘’]/g, "");
-const DEF_MODEL = "gemini-2.5-flash"; // hızlı ve kararlı; bulunamazsa uygun model kendiliğinden seçilir
+const DEF_MODEL = "gemini-3.8-flash"; // Google 2026 sonunda yeni kullanıcılara bunu öneriyor; kaldırılırsa hata mesajındaki öneriye geçilir
 const GEM_API = "https://generativelanguage.googleapis.com/v1beta/models";
 // model adı bulunamazsa (404) anahtarın erişebildiği en uygun "flash" modelini seç
 // "Gemini 3.1 Pro" gibi yazılan adı API biçimine çevir: "gemini-3.1-pro"
@@ -3042,7 +3042,7 @@ async function pickModel(key, want, exclude = []) {
   const ver = n => parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1]) || 0;
   const tier = n => /flash-lite/.test(n) ? "lite" : /flash/.test(n) ? "flash" : /pro/.test(n) ? "pro" : "";
   const rank = n => (w && n === w ? 1e6 : 0) + (w && n.startsWith(w) ? 1e5 : 0) + (w && tier(w) && tier(n) === tier(w) ? 1e4 : 0) + (w && ver(w) && ver(n) === ver(w) ? 5e3 : 0)
-    + (!w && tier(n) === "flash" ? 1e4 : 0) + (/-latest$/.test(n) ? 50 : 0) + (/preview/.test(n) ? -20 : 0) + ver(n) * 10;
+    + (!w && tier(n) === "flash" ? 1e4 : 0) + (/-latest$/.test(n) ? 5 : 0) + (/preview/.test(n) ? -20 : 0) + ver(n) * 10;
   return ms.sort((a, b) => rank(b) - rank(a))[0] || null;
 }
 // hata → kullanıcıya anlaşılır açıklama
@@ -3060,7 +3060,7 @@ function gemError(e) {
 // düşünme ayarı: kayıt işleri için uzun "düşünme" gereksiz ve yavaş; desteklemeyen model 400 verirse ayar kaldırılır
 const thinkCfg = m => /gemini-2\.5-flash/.test(m) ? {thinkingBudget:0} : /gemini-2\.5-pro/.test(m) ? {thinkingBudget:128} : /gemini-[3-9]|latest/.test(m) ? {thinkingLevel:"low"} : null;
 async function gemini(prompt, {json = true, search = false, noThink = false} = {}, retried, viaQuery, tried = []) {
-  const c = gemCfg(); c.key = cleanKey(c.key); const model = (normModel(c.model) === "gemini-flash-latest" && !c.note ? "" : normModel(c.model)) || DEF_MODEL; // eski varsayılan (elle seçilmemişse) yavaştı
+  const c = gemCfg(); c.key = cleanKey(c.key); const model = (normModel(c.model) === "gemini-flash-latest" && !c.note && !tried.length ? "" : normModel(c.model)) || DEF_MODEL; // eski varsayılan (elle seçilmemişse) yavaştı
   const body = {contents:[{role:"user", parts:[{text:prompt}]}], generationConfig:{temperature:0.2}};
   if (json && !search) body.generationConfig.responseMimeType = "application/json";
   if (search) body.tools = [{google_search:{}}];
@@ -3074,14 +3074,19 @@ async function gemini(prompt, {json = true, search = false, noThink = false} = {
       const e = new Error("gemini " + r.status); e.status = r.status; try { e.detail = (await r.json()).error.message; } catch (x) {}
       // model adı tanınmadı → en yakın gerçek model; kota/hız sınırı (429) → sırayla diğer flash modelleri (en çok 5 deneme)
       if (r.status === 400 && tc && /think/i.test(e.detail || "")) { clearTimeout(tm); gemSave({...gemCfg(), noThink:true}); return gemini(prompt, {json, search, noThink:true}, retried, viaQuery, tried); }
-      const badName = r.status === 404 || r.status === 400 && /model/i.test(e.detail || "");
+      // Google eski modeli kapattıysa mesajında yenisini önerir ("use models/gemini-…"): doğrudan ona geç
+      const rec = (e.detail || "").match(/use (?:models\/)?(gemini-[a-z0-9.\-]*[a-z0-9])/i);
+      if ([400, 403, 404].includes(r.status) && rec && rec[1] !== model && !tried.includes(rec[1]) && tried.length < 5) {
+        clearTimeout(tm); gemSave({...gemCfg(), model:rec[1], note:model + " artık kullanılamıyor; Google’ın önerdiği " + rec[1] + " seçildi."}); return gemini(prompt, {json, search}, true, viaQuery, tried.concat([model]));
+      }
+      const badName = r.status === 404 || r.status === 400 && /model/i.test(e.detail || "") || /no longer available/i.test(e.detail || "");
       if (r.status === 401 && !viaQuery) { clearTimeout(tm); return gemini(prompt, {json, search}, retried, true, tried); }
       // model aşırı yoğun (500/502/503/504) da kota gibi: sıradaki modele geç
       const busy = [500, 502, 503, 504].includes(r.status);
       if ((badName || busy || r.status === 429) && tried.length < 5) {
         const t = tried.concat([model]);
-        let m = null; try { m = await pickModel(c.key, badName && !tried.length ? model : "", t); } catch (x) {}
-        if (m) { gemSave({...gemCfg(), model:m, note:r.status === 429 ? model + " için kota/hız sınırı vardı; " + m + " seçildi." : busy ? model + " çok yoğundu; " + m + " seçildi." : ""}); clearTimeout(tm); return gemini(prompt, {json, search}, true, viaQuery, t); }
+        let m = null; try { m = await pickModel(c.key, badName && !tried.length && !/no longer available/i.test(e.detail || "") ? model : "", t); } catch (x) {}
+        if (m) { gemSave({...gemCfg(), model:m, note:r.status === 429 ? model + " için kota/hız sınırı vardı; " + m + " seçildi." : busy ? model + " çok yoğundu; " + m + " seçildi." : model + " bulunamadı; " + m + " seçildi."}); clearTimeout(tm); return gemini(prompt, {json, search}, true, viaQuery, t); }
         e.tried = t;
       }
       throw e;
