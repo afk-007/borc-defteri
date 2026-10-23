@@ -3036,8 +3036,8 @@ async function listModels(key) {
     .filter(n => /^gemini/.test(n) && !/image|tts|audio|live|embed|exp|robotics|computer/.test(n));
 }
 // istenen ada en yakın modeli seç (ör. "gemini-3.1-pro" → "gemini-3.1-pro-preview"); ad yoksa en yeni flash
-async function pickModel(key, want) {
-  const ms = await listModels(key), w = normModel(want || "");
+async function pickModel(key, want, exclude = []) {
+  const ms = (await listModels(key)).filter(n => !exclude.includes(n)), w = normModel(want || "");
   const ver = n => parseFloat((n.match(/gemini-(\d+(?:\.\d+)?)/) || [])[1]) || 0;
   const tier = n => /flash-lite/.test(n) ? "lite" : /flash/.test(n) ? "flash" : /pro/.test(n) ? "pro" : "";
   const rank = n => (w && n === w ? 1e6 : 0) + (w && n.startsWith(w) ? 1e5 : 0) + (w && tier(w) && tier(n) === tier(w) ? 1e4 : 0) + (w && ver(w) && ver(n) === ver(w) ? 5e3 : 0)
@@ -3049,13 +3049,13 @@ function gemError(e) {
   const d = String(e && (e.detail || e.message) || ""), st = e && e.status;
   if (/API key not valid|API_KEY_INVALID|invalid api key|invalid authentication credentials/i.test(d) || st === 400 && /key/i.test(d) || st === 401) return "Anahtar geçersiz. Proje adını ya da numarasını değil, “AQ.” (ya da eski anahtarlarda “AIza”) ile başlayan uzun anahtarın kendisini yapıştırın (AI Studio → API keys → anahtarın yanındaki kopyala simgesi). Anahtar yeni oluşturulduysa birkaç dakika bekleyip yeniden deneyin.";
   if (st === 403) return "Anahtarın bu hizmete izni yok (" + d + "). AI Studio'da yeni bir anahtar oluşturmayı deneyin.";
-  if (st === 429) return "Gemini kotası doldu; biraz sonra yeniden deneyin. Bu sırada asistan öğrendikleriyle çalışır.";
+  if (st === 429) return "Gemini kota/hız sınırı (" + (e.tried && e.tried.length ? "denenen modeller: " + e.tried.join(", ") : "model: " + (gemCfg().model || "")) + "). Google'ın açıklaması: " + d.slice(0, 220) + (/limit: ?0/i.test(d) ? " — Bu, anahtarın bağlı olduğu projede bu modelin ücretsiz kotasının hiç olmadığı anlamına gelir; AI Studio'da yeni bir proje ile anahtar oluşturmayı deneyin." : " Bir dakika sonra yeniden deneyin.") + " Bu sırada asistan öğrendikleriyle çalışır.";
   if (st === 404) return "Model bulunamadı: " + d;
   if (e && (e.name === "AbortError")) return "Gemini 30 saniyede yanıt vermedi; internet bağlantısını kontrol edin.";
   if (e && e.name === "TypeError") return "Google'a ulaşılamadı; internet bağlantısını kontrol edin.";
   return "Bağlanamadı: " + d + (st ? " (kod " + st + ")" : "");
 }
-async function gemini(prompt, {json = true, search = false} = {}, retried, viaQuery) {
+async function gemini(prompt, {json = true, search = false} = {}, retried, viaQuery, tried = []) {
   const c = gemCfg(); c.key = cleanKey(c.key); const model = normModel(c.model) || "gemini-flash-latest";
   const body = {contents:[{role:"user", parts:[{text:prompt}]}], generationConfig:{temperature:0.2}};
   if (json && !search) body.generationConfig.responseMimeType = "application/json";
@@ -3067,13 +3067,14 @@ async function gemini(prompt, {json = true, search = false} = {}, retried, viaQu
       {method:"POST", headers:viaQuery ? {"Content-Type":"application/json"} : {"Content-Type":"application/json", "x-goog-api-key":c.key}, body:JSON.stringify(body), signal:ctl.signal});
     if (!r.ok) {
       const e = new Error("gemini " + r.status); e.status = r.status; try { e.detail = (await r.json()).error.message; } catch (x) {}
-      // model adı tanınmadı → en yakın gerçek model; ücretsiz kotası olmayan model (Pro) → en yeni flash
+      // model adı tanınmadı → en yakın gerçek model; kota/hız sınırı (429) → sırayla diğer flash modelleri (en çok 5 deneme)
       const badName = r.status === 404 || r.status === 400 && /model/i.test(e.detail || "");
-      const noQuota = r.status === 429 && /limit: ?0|free_tier/i.test(e.detail || "");
-      if (r.status === 401 && !viaQuery) { clearTimeout(tm); return gemini(prompt, {json, search}, retried, true); }
-      if ((badName || noQuota) && !retried) {
-        const m = await pickModel(c.key, noQuota ? "" : model);
-        if (m && m !== model) { gemSave({...gemCfg(), model:m, note:noQuota ? model + " ücretsiz API'de kullanılamıyor; " + m + " seçildi." : ""}); return gemini(prompt, {json, search}, true); }
+      if (r.status === 401 && !viaQuery) { clearTimeout(tm); return gemini(prompt, {json, search}, retried, true, tried); }
+      if ((badName || r.status === 429) && tried.length < 5) {
+        const t = tried.concat([model]);
+        let m = null; try { m = await pickModel(c.key, badName && !tried.length ? model : "", t); } catch (x) {}
+        if (m) { gemSave({...gemCfg(), model:m, note:r.status === 429 ? model + " için kota/hız sınırı vardı; " + m + " seçildi." : ""}); clearTimeout(tm); return gemini(prompt, {json, search}, true, viaQuery, t); }
+        e.tried = t;
       }
       throw e;
     }
@@ -3114,6 +3115,8 @@ async function updateRatesGemini(force) {
   const cur = S.rates || {}, last = cur.updated ? parseISO(String(cur.updated).slice(0, 10)) : null, T = today();
   const mark = T.getDate() >= 15 ? new Date(T.getFullYear(), T.getMonth(), 15) : new Date(T.getFullYear(), T.getMonth(), 1);
   if (!force && last && last >= mark) return false;
+  // otomatik deneme günde en fazla bir kez (başarısız olsa da kotayı tekrar tekrar harcamasın)
+  if (!force) { try { if (localStorage.getItem("borc-defteri-rates-try") === iso(T)) return false; localStorage.setItem("borc-defteri-rates-try", iso(T)); } catch (e) {} }
   if (!navigator.onLine) return false;
   const banks = [...new Set(S.accounts.filter(a => a.type === "kart" || a.type === "kmh").map(a => bankKey(a.bank)))];
   const res = await gemini(`Türkiye'de bugün (${iso(T)}) geçerli faiz oranlarını Google aramasıyla bul. Yalnızca JSON döndür, açıklama yazma:
