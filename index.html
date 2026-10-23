@@ -3051,6 +3051,7 @@ function gemError(e) {
   if (st === 403) return "Anahtarın bu hizmete izni yok (" + d + "). AI Studio'da yeni bir anahtar oluşturmayı deneyin.";
   if (st === 429) return "Gemini kota/hız sınırı (" + (e.tried && e.tried.length ? "denenen modeller: " + e.tried.join(", ") : "model: " + (gemCfg().model || "")) + "). Google'ın açıklaması: " + d.slice(0, 220) + (/limit: ?0/i.test(d) ? " — Bu, anahtarın bağlı olduğu projede bu modelin ücretsiz kotasının hiç olmadığı anlamına gelir; AI Studio'da yeni bir proje ile anahtar oluşturmayı deneyin." : " Bir dakika sonra yeniden deneyin.") + " Bu sırada asistan öğrendikleriyle çalışır.";
   if (st === 404) return "Model bulunamadı: " + d;
+  if ([500, 502, 503, 504].includes(st)) return "Gemini şu an çok yoğun (" + (e.tried && e.tried.length ? "denenen modeller: " + e.tried.join(", ") : "kod " + st) + "). Bu Google tarafında geçici bir durum; birkaç dakika sonra yeniden deneyin. Bu sırada asistan öğrendikleriyle çalışır.";
   if (e && (e.name === "AbortError")) return "Gemini 60 saniyede yanıt vermedi (model: " + (gemCfg().model || "gemini-flash-latest") + "). İnternet bağlantısını kontrol edin ya da Veri ve yedek → Asistan bölümünde modeli “gemini-2.5-flash” yapıp yeniden deneyin.";
   if (e && e.name === "TypeError") return "Google'a ulaşılamadı; internet bağlantısını kontrol edin.";
   return "Bağlanamadı: " + d + (st ? " (kod " + st + ")" : "");
@@ -3074,10 +3075,12 @@ async function gemini(prompt, {json = true, search = false, noThink = false} = {
       if (r.status === 400 && tc && /think/i.test(e.detail || "")) { clearTimeout(tm); gemSave({...gemCfg(), noThink:true}); return gemini(prompt, {json, search, noThink:true}, retried, viaQuery, tried); }
       const badName = r.status === 404 || r.status === 400 && /model/i.test(e.detail || "");
       if (r.status === 401 && !viaQuery) { clearTimeout(tm); return gemini(prompt, {json, search}, retried, true, tried); }
-      if ((badName || r.status === 429) && tried.length < 5) {
+      // model aşırı yoğun (500/502/503/504) da kota gibi: sıradaki modele geç
+      const busy = [500, 502, 503, 504].includes(r.status);
+      if ((badName || busy || r.status === 429) && tried.length < 5) {
         const t = tried.concat([model]);
         let m = null; try { m = await pickModel(c.key, badName && !tried.length ? model : "", t); } catch (x) {}
-        if (m) { gemSave({...gemCfg(), model:m, note:r.status === 429 ? model + " için kota/hız sınırı vardı; " + m + " seçildi." : ""}); clearTimeout(tm); return gemini(prompt, {json, search}, true, viaQuery, t); }
+        if (m) { gemSave({...gemCfg(), model:m, note:r.status === 429 ? model + " için kota/hız sınırı vardı; " + m + " seçildi." : busy ? model + " çok yoğundu; " + m + " seçildi." : ""}); clearTimeout(tm); return gemini(prompt, {json, search}, true, viaQuery, t); }
         e.tried = t;
       }
       throw e;
