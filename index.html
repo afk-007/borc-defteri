@@ -23,6 +23,8 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600;700&display=swap">
 <style>
 [hidden]{display:none!important}
+/* yazarken (klavye açıkken) yüzen düğmeler yazı kutusunu kapatmasın */
+body.typing .ai-fab,body.typing .fab{display:none!important}
 /* Layout: one phone-width column; sticky header, fixed bottom tab bar; summary first, detail opens in bottom sheets */
 :root{
   --bg:#EDF1EF; --surface:#FFFFFF; --sunk:#E2E9E5; --ink:#12201B; --ink-2:#46564F; --ink-3:#74847D; --line:#D4DDD8;
@@ -2408,6 +2410,9 @@ function yearHover(e) {
   read.innerHTML = yearRead(d, col ? d.months[+col.dataset.i] : null);
 }
 document.addEventListener("pointerover", yearHover);
+const isField = el => el && (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || (el.tagName === "INPUT" && !["button", "submit", "checkbox", "radio", "file"].includes(el.type)));
+document.addEventListener("focusin", e => { if (isField(e.target)) document.body.classList.add("typing"); });
+document.addEventListener("focusout", () => setTimeout(() => { if (!isField(document.activeElement)) document.body.classList.remove("typing"); }, 100));
 document.addEventListener("focusin", yearHover);
 document.addEventListener("click", e => {
   const tab = e.target.closest(".tab");
